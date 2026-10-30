@@ -1,7 +1,7 @@
 import '@mappedin/mappedin-js/lib/index.css';
 import './style.css';
 
-import { show3dMap, type Coordinate, type Directions, type MapData, type MapView, type Marker } from '@mappedin/mappedin-js';
+import { show3dMap, type Coordinate, type Directions, type MapData, type MapView, type Marker, type Path } from '@mappedin/mappedin-js';
 import { loadMapData } from './cache';
 import { DEFAULT_VENUE, VENUE, WALK_SPEED_MPS } from './config';
 import { buildSteps, storesPassed, type Step } from './directions';
@@ -51,6 +51,36 @@ let categories: string[] = [];
 let areas: RoutingAreas = { anchors: [], zones: [] };
 let hereMarker: Marker | undefined;
 let stepMarker: Marker | undefined;
+/** Gray lines for the legs you're not walking right now, and which leg is drawn in full. */
+let otherLegPaths: Path[] = [];
+let drawnLeg = -1;
+
+const ACTIVE_ROUTE_STYLE = {
+  pathOptions: { color: '#2457F5', accentColor: '#9DB5FF', width: 1.1, displayArrowsOnPath: true, animateArrowsOnPath: true },
+  markerOptions: { departureColor: '#0F1B2D', destinationColor: '#E5484D' },
+};
+
+/**
+ * Draw the leg being walked in full (arrows, start and end markers) and the rest as plain
+ * gray lines. The SDK only styles the leg that was active when a route was first drawn, so
+ * moving to the next leg redraws instead of just switching the active path.
+ */
+async function drawLeg(i: number) {
+  if (i === drawnLeg || !state.legs[i]) return;
+  clearRouteDrawing();
+  drawnLeg = i;
+  otherLegPaths = state.legs
+    .filter((_, j) => j !== i)
+    .map(leg => mapView.Paths.add(leg.coordinates, { color: '#9AA6B8', width: 0.9 }));
+  await mapView.Navigation.draw(state.legs[i], ACTIVE_ROUTE_STYLE);
+}
+
+function clearRouteDrawing() {
+  mapView.Navigation.clear();
+  otherLegPaths.forEach(p => mapView.Paths.remove(p));
+  otherLegPaths = [];
+  drawnLeg = -1;
+}
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const sheetBody = $('sheet-body');
@@ -226,12 +256,8 @@ async function route() {
   state.stepIndex = 0;
   state.showAllSteps = false;
 
-  mapView.Navigation.clear();
-  await mapView.Navigation.draw(state.legs.length === 1 ? state.legs[0] : state.legs, {
-    pathOptions: { color: '#2457F5', accentColor: '#9DB5FF', width: 1.1, displayArrowsOnPath: true, animateArrowsOnPath: true },
-    inactivePathOptions: { color: '#9AA6B8', width: 0.9 },
-    markerOptions: { departureColor: '#0F1B2D', destinationColor: '#E5484D' },
-  });
+  drawnLeg = -1;
+  await drawLeg(0);
   syncUrl();
   show('route');
 }
@@ -255,7 +281,7 @@ function removeStop(i: number) {
 }
 
 function endRoute() {
-  mapView.Navigation.clear();
+  clearRouteDrawing();
   if (stepMarker) mapView.Markers.remove(stepMarker);
   stepMarker = undefined;
   state.stops = [];
@@ -272,7 +298,7 @@ function goToStep(i: number) {
   state.stepIndex = Math.max(0, Math.min(state.steps.length - 1, i));
   const step = state.steps[state.stepIndex];
   if (!step) return render();
-  if (state.legs.length > 1) mapView.Navigation.setActivePathByIndex(state.stepLeg[state.stepIndex] ?? 0);
+  void drawLeg(state.stepLeg[state.stepIndex] ?? 0);
 
   if (stepMarker) mapView.Markers.remove(stepMarker);
   stepMarker = mapView.Markers.add(step.at, `<div class="pin-step">${state.stepIndex + 1}</div>`, {
