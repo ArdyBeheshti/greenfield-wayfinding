@@ -14,9 +14,17 @@ export async function directionsTo(
   store: Store,
   options?: RouteOptions,
 ): Promise<{ directions: Directions; unit: Unit } | undefined> {
+  // Elevators are for the accessible route. Everyone else takes escalators or stairs, which
+  // keeps elevators free for wheelchairs and strollers; only if a place can't be reached any
+  // other way does the default route use one.
+  const avoidElevators = options?.accessible
+    ? undefined
+    : { ...options, excludedConnections: mapData.getByType('connection').filter(c => c.type === 'elevator') };
   let best: { directions: Directions; unit: Unit } | undefined;
   for (const unit of store.units) {
-    const directions = await mapData.getDirections(from, unit.target, options);
+    const directions =
+      (avoidElevators && (await mapData.getDirections(from, unit.target, avoidElevators))) ||
+      (await mapData.getDirections(from, unit.target, options));
     if (directions && (!best || directions.distance < best.directions.distance)) best = { directions, unit };
   }
   return best;

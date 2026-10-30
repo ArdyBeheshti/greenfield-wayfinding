@@ -236,3 +236,6 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--go); outlin
 
 /* Arrival: carry on from this store. */
 .from-here { margin-top: 12px; width: 100%; padding: 12px 14px; border-radius: 14px; background: var(--go); color: #fff; font-weight: 700; font-size: 15px; }
+
+.toggle__text { display: flex; flex-direction: column; gap: 2px; }
+.toggle__text small { font-size: 13px; color: var(--muted); }

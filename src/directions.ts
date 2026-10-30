@@ -141,7 +141,7 @@ export function buildSteps(
         steps.push({
           icon: 'connection',
           title: `Take the ${kind}${dir}${toFloor ? ` to ${toFloor}` : ''}`,
-          detail: kind === 'elevator' ? 'Step-free' : kind === 'escalator' ? 'Stand right, walk left' : '',
+          detail: kind === 'elevator' ? 'No stairs or escalators' : kind === 'escalator' ? 'Stand right, walk left' : '',
           at: ins.coordinate,
           until: next,
           distance: after,

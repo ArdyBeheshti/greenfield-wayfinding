@@ -590,11 +590,11 @@ function renderSearch() {
  * Step-free is decided before the route, like "avoid tolls" in a car app: a wheelchair or
  * stroller user shouldn't be shown an escalator route first. Multi-level venues only.
  */
-function stepFreeChoice(): string {
+function stepFreeChoice(id = 'accessible'): string {
   if (floors.length < 2) return '';
   return `<label class="toggle toggle--top">
-      <input id="accessible" type="checkbox" ${state.accessible ? 'checked' : ''} />
-      <span><strong>Step-free route</strong> · elevators only, no stairs or escalators</span>
+      <input id="${id}" type="checkbox" ${state.accessible ? 'checked' : ''} />
+      <span class="toggle__text"><strong>Accessible Friendly Route</strong><small>Elevators only, no stairs or escalators</small></span>
     </label>`;
 }
 
@@ -615,13 +615,9 @@ function renderRoute() {
   const atEnd = stepIndex === steps.length - 1 && step?.icon === 'arrive';
   const connections = steps.filter(s => s.icon === 'connection' && s.title.startsWith('Take'));
   const changesLevel = connections.length > 0;
-  const levelSummary = state.accessible ? 'step-free (elevator)' : connections.map(c => c.landmark).join(', ');
+  const levelSummary = state.accessible ? 'accessible (elevator)' : connections.map(c => c.landmark).join(', ');
   // Offer step-free whenever the route changes level, or the venue has more than one.
-  const stepFreeToggle =
-    changesLevel || floors.length > 1
-      ? `<label class="toggle toggle--route"><input id="route-accessible" type="checkbox" ${state.accessible ? 'checked' : ''} />
-          <span>Step-free route${changesLevel && !state.accessible ? ' (avoid escalators and stairs)' : ''}</span></label>`
-      : '';
+  const stepFreeToggle = stepFreeChoice('route-accessible');
 
   const stopList =
     stops.length > 1
