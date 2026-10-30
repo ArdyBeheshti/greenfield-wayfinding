@@ -51,27 +51,29 @@ let categories: string[] = [];
 let areas: RoutingAreas = { anchors: [], zones: [] };
 let hereMarker: Marker | undefined;
 let stepMarker: Marker | undefined;
-/** Gray lines for the legs you're not walking right now, and which leg is drawn in full. */
+/** Gray lines for the legs still ahead, and which leg is drawn in full. */
 let otherLegPaths: Path[] = [];
 let drawnLeg = -1;
 
 const ACTIVE_ROUTE_STYLE = {
-  pathOptions: { color: '#2457F5', accentColor: '#9DB5FF', width: 1.1, displayArrowsOnPath: true, animateArrowsOnPath: true },
+  // Raised slightly so the leg being walked always draws on top where legs overlap.
+  pathOptions: { color: '#2457F5', accentColor: '#9DB5FF', width: 1.1, displayArrowsOnPath: true, animateArrowsOnPath: true, verticalOffset: 0.3 },
   markerOptions: { departureColor: '#0F1B2D', destinationColor: '#E5484D' },
 };
 
 /**
- * Draw the leg being walked in full (arrows, start and end markers) and the rest as plain
- * gray lines. The SDK only styles the leg that was active when a route was first drawn, so
- * moving to the next leg redraws instead of just switching the active path.
+ * Draw the leg being walked in full (arrows, start and end markers, on top), the legs still
+ * ahead as thin gray lines, and nothing for legs already finished, so the map only shows
+ * what's left. Stepping back redraws the earlier leg. (The SDK only styles the leg that was
+ * active when a route was first drawn, so changing legs redraws rather than switching.)
  */
 async function drawLeg(i: number) {
   if (i === drawnLeg || !state.legs[i]) return;
   clearRouteDrawing();
   drawnLeg = i;
   otherLegPaths = state.legs
-    .filter((_, j) => j !== i)
-    .map(leg => mapView.Paths.add(leg.coordinates, { color: '#9AA6B8', width: 0.9 }));
+    .filter((_, j) => j > i)
+    .map(leg => mapView.Paths.add(leg.coordinates, { color: '#9AA6B8', width: 0.8, verticalOffset: 0 }));
   await mapView.Navigation.draw(state.legs[i], ACTIVE_ROUTE_STYLE);
 }
 
