@@ -52,7 +52,12 @@ export function buildSteps(
   anchors: Anchor[] = [],
 ): Step[] {
   const legs = simplify(directions.instructions);
+  // A map pin (ATM, elevator, taxi stand) rather than a room you walk into.
+  const isPin = to.units.every(u => !u.spaceId);
   const candidates = stores.filter(s => s.id !== to.id);
+  // Other units of the destination (another ATM) aren't landmarks on the way to "the ATM".
+  const bare = (n: string) => n.toLowerCase().replace(/^the /, '');
+  anchors = anchors.filter(a => bare(a.name) !== bare(to.name));
   const steps: Step[] = [];
   // From parking: the mall door this route walks in through, and where it sits on the route.
   const entry = from.kind === 'parking' ? entryDoor(directions.coordinates, from.doorways) : undefined;
@@ -160,8 +165,8 @@ export function buildSteps(
       case 'Arrival':
         steps.push({
           icon: 'arrive',
-          title: `Arrive at ${to.name}`,
-          detail: 'Look for the storefront',
+          title: `Arrive at ${refName(to)}`,
+          detail: isPin ? "You've arrived" : 'Look for the storefront',
           at: ins.coordinate,
           until: ins.coordinate,
           distance: 0,
@@ -179,7 +184,11 @@ export function buildSteps(
     if (!['left', 'right', 'slight-left', 'slight-right', 'back'].includes(turn.icon)) continue;
     steps.splice(i, 2, {
       ...turn,
-      title: `${off.title}, then ${turn.title.charAt(0).toLowerCase()}${turn.title.slice(1)}`,
+      // You just stepped off it, so "after the escalator" says nothing new.
+      title: `${off.title}, then ${turn.title.charAt(0).toLowerCase()}${turn.title.slice(1)}`.replace(
+        / (after|before|by|at) the (escalator|elevator|stairs)$/,
+        '',
+      ),
       landmark: turn.landmark ?? off.landmark,
     });
   }
@@ -215,15 +224,16 @@ export function buildSteps(
     const side = beforeLast.icon.includes('left') ? 'left' : 'right';
     steps.splice(steps.length - 2, 2, {
       ...last,
-      title: `Turn ${side} into ${to.name}`,
-      detail: beforeLast.phrase ? `It's ${beforeLast.phrase}` : "You've arrived",
+      // You walk into a store; you walk up to an ATM or an elevator.
+      title: isPin ? `${capitalize(refName(to))} is on your ${side}` : `Turn ${side} into ${to.name}`,
+      detail: beforeLast.phrase && !/^through /.test(beforeLast.phrase) ? `It's ${beforeLast.phrase}` : "You've arrived",
       at: beforeLast.at,
     });
   }
 
   // Start and destination on top of each other (e.g. an entrance that opens into the store).
   if (!steps.some(s => s.icon === 'arrive')) {
-    const at = directions.coordinates[directions.coordinates.length - 1] ?? to.space.center;
+    const at = directions.coordinates[directions.coordinates.length - 1] ?? to.units[0].center;
     steps.push({ icon: 'arrive', title: `${to.name} is right here`, detail: 'No walking needed', at, until: at, distance: 0 });
   }
   return steps;
@@ -342,7 +352,7 @@ function describeTurnSpot(
         const lateral = fwd.x * d.y - fwd.y * d.x; // > 0 means to the left
         return { along, side: lateral > 0 ? 'left' : 'right', dist: Math.hypot(d.x, d.y) };
       });
-      return { name: s.name, ...pts.reduce((a, c) => (c.dist < a.dist ? c : a)) };
+      return { name: refName(s), ...pts.reduce((a, c) => (c.dist < a.dist ? c : a)) };
     })
     .filter(s => s.dist <= LANDMARK_RADIUS_M)
     .sort((a, b) => a.dist - b.dist);
@@ -387,7 +397,7 @@ function passedOnLeg(route: Coordinate[], from: Coordinate, to: Coordinate, stor
     const best = s.frontage.map(f => distanceToPolylineM(f, leg)).reduce((a, b) => (b.distance < a.distance ? b : a));
     // skip the very ends of the stretch: those belong to the turn instructions
     if (best.distance <= PASS_RADIUS_M && best.index > 0.3 && best.index < leg.length - 1.3) {
-      hits.push({ name: s.name, index: best.index });
+      hits.push({ name: refName(s), index: best.index });
     }
   }
   for (const a of anchors) {
@@ -395,7 +405,17 @@ function passedOnLeg(route: Coordinate[], from: Coordinate, to: Coordinate, stor
     const near = leg.map((p, i) => ({ i, d: distanceToAnchorM(p, a) })).filter(x => x.d <= 4);
     if (near.length) hits.push({ name: a.name, index: near[0].i });
   }
-  return hits.sort((a, b) => a.index - b.index).map(h => h.name);
+  // One mention per name ("Curbside Pickup" can be both a directory pin and a map landmark).
+  const seen = new Set<string>();
+  return hits
+    .sort((a, b) => a.index - b.index)
+    .map(h => h.name)
+    .filter(n => {
+      const key = n.toLowerCase().replace(/^the /, '');
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
 /** Meters along a polyline up to a fractional point index (as returned by distanceToPolylineM). */
@@ -426,7 +446,11 @@ function entryDoor(
 
 /** Stores on the same level as a point (single-level maps return everything). */
 function sameFloor(stores: Store[], at: Coordinate): Store[] {
-  return at.floorId ? stores.filter(s => s.space.floor.id === at.floorId) : stores;
+  if (!at.floorId) return stores;
+  // Only the storefronts on this level (a restroom upstairs isn't a landmark down here).
+  return stores
+    .map(s => ({ ...s, frontage: s.frontage.filter(f => !f.floorId || f.floorId === at.floorId) }))
+    .filter(s => s.frontage.length);
 }
 
 /** Stores whose frontage sits right on the route, in the order the shopper walks past them. */
@@ -436,14 +460,27 @@ export function storesPassed(directions: Directions, to: Store, stores: Store[],
   return stores
     .filter(s => s.id !== to.id)
     .map(s => {
-      const onLevel = line.filter(p => !p.floorId || p.floorId === s.space.floor.id);
-      if (onLevel.length < 2) return { name: s.name, distance: Infinity, index: 0 };
-      const hits = s.frontage.map(f => distanceToPolylineM(f, onLevel));
+      // Each storefront point only counts against the route on its own level.
+      const hits = s.frontage
+        .map(f => {
+          const onLevel = line.filter(p => !p.floorId || !f.floorId || p.floorId === f.floorId);
+          return onLevel.length < 2 ? { distance: Infinity, index: 0 } : distanceToPolylineM(f, onLevel);
+        });
       const best = hits.reduce((a, b) => (b.distance < a.distance ? b : a));
-      return { name: s.name, ...best };
+      return { name: refName(s), ...best };
     })
     .filter(h => h.distance <= PASS_RADIUS_M)
     .sort((a, b) => a.index - b.index)
     .slice(0, limit)
     .map(h => h.name);
+}
+
+/** How a place reads mid-sentence: stores by name, map pins with "the" ("after the escalator"). */
+function refName(s: Store): string {
+  if (!s.units.every(u => !u.spaceId)) return s.name;
+  return `the ${/^(elevator|escalator)$/i.test(s.name) ? s.name.toLowerCase() : s.name}`;
+}
+
+function capitalize(t: string): string {
+  return t.charAt(0).toUpperCase() + t.slice(1);
 }

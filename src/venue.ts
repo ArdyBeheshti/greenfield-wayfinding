@@ -7,13 +7,23 @@ import type { Door, EnterpriseLocation, Floor, MapData, Space, TNavigationTarget
 import { VENUE } from './config';
 import { bearingDeg, centroid, compassName, distanceM, type LatLng } from './geo';
 
+/** One physical place a directory entry can be: a store unit, an ATM, one of the restrooms. */
+export type Unit = {
+  target: TNavigationTarget;
+  center: Coordinate;
+  floor: Floor;
+  /** The room, when the unit is one (map taps match on it). */
+  spaceId?: string;
+};
+
 export type Store = {
   id: string;
   name: string;
   categories: string[];
   description: string;
-  space: Space;
-  /** Points a shopper would see from the corridor: doors if mapped, otherwise the space center. */
+  /** Every place this entry can be. Routes go to the nearest one ("the closest restroom"). */
+  units: Unit[];
+  /** Points a shopper would see from the corridor, on every unit: doors if mapped, else the outline. */
   frontage: Coordinate[];
   /** Pre-lowercased text used by search. */
   haystack: string;
@@ -32,7 +42,9 @@ export type Entrance = {
   doorways: { name: string; coordinate: Coordinate; radius?: number }[];
 };
 
-const NOT_A_DESTINATION = /parking|entrance|entry|exit|hallway|corridor|walkway|stair|elevator|escalator|service|storage|electrical|mechanical/i;
+// Back-of-house and circulation. ("Service" alone would also hide Guest Services.)
+const NOT_A_DESTINATION =
+  /parking|entrance|entry|exit|hallway|corridor|walkway|stair|elevator|escalator|service (room|area|corridor|hall)|storage|electrical|mechanical/i;
 
 /** The level with the most stores is the "main level" the SOW scopes us to. */
 export function pickMainFloor(mapData: MapData, fallback: Floor): Floor {
@@ -70,34 +82,36 @@ export function applyTenants(mapData: MapData): void {
 export function buildStores(mapData: MapData, floors: Floor[]): Store[] {
   const byName = new Map<string, Store>();
   const onFloors = new Set(floors.map(f => f.id));
+  const floorById = new Map(mapData.getByType('floor').map(f => [f.id, f]));
+  const spaceUnits = (spaces: Space[]): Unit[] =>
+    spaces.filter(sp => onFloors.has(sp.floor.id)).map(sp => ({ target: sp, center: sp.center, floor: sp.floor, spaceId: sp.id }));
 
-  // Enterprise CMS maps: tenants and amenities (restrooms, guest services) with a space.
+  // Enterprise CMS maps: tenants and amenities. Amenities are often map points rather than
+  // rooms (ATMs, taxi stand, curbside pickup), and often more than one (restrooms).
   for (const loc of mapData.getByType('enterprise-location')) {
-    const space = loc.spaces.find(s => onFloors.has(s.floor.id));
     const name = loc.name?.trim();
-    if (!space || !name || loc.hidden || !isEnterpriseDestination(loc) || NOT_A_DESTINATION.test(name)) continue;
+    if (!name || loc.hidden || !isEnterpriseDestination(loc) || NOT_A_DESTINATION.test(name)) continue;
+    const units = [
+      ...spaceUnits(loc.spaces),
+      ...loc.points
+        .filter(p => onFloors.has(p.floor.id))
+        .map(p => ({ target: p, center: p.coordinate, floor: p.floor })),
+    ];
     addStore(byName, {
       id: loc.id,
       name,
       categories: loc.categories.map(c => c.name).filter(Boolean),
       description: loc.description ?? '',
-      space,
+      units,
     });
   }
 
   for (const profile of mapData.getByType('location-profile')) {
-    const space = profile.spaces.find(s => onFloors.has(s.floor.id));
     const name = profile.name?.trim();
-    if (!space || !name || NOT_A_DESTINATION.test(name)) continue;
+    if (!name || NOT_A_DESTINATION.test(name)) continue;
     const tenant = VENUE.tenants?.[profile.id];
     const categories = tenant ? [tenant.category] : profile.categories.map(c => c.name).filter(Boolean);
-    addStore(byName, {
-      id: profile.id,
-      name,
-      categories,
-      description: profile.description ?? '',
-      space,
-    });
+    addStore(byName, { id: profile.id, name, categories, description: profile.description ?? '', units: spaceUnits(profile.spaces) });
   }
 
   // Some maps name spaces without attaching profiles. Fall back to named spaces so the
@@ -105,8 +119,23 @@ export function buildStores(mapData: MapData, floors: Floor[]): Store[] {
   if (byName.size === 0) {
     for (const space of mapData.getByType('space')) {
       const name = space.name?.trim();
-      if (!onFloors.has(space.floor.id) || !name || NOT_A_DESTINATION.test(name)) continue;
-      addStore(byName, { id: space.id, name, categories: [], description: space.description, space });
+      if (!name || NOT_A_DESTINATION.test(name)) continue;
+      addStore(byName, { id: space.id, name, categories: [], description: space.description, units: spaceUnits([space]) });
+    }
+  }
+
+  // Multi-level venues: elevators and escalators are things people look for too (strollers,
+  // wheelchairs, "meet me by the escalator"). Every landing is a unit; routes go to the nearest.
+  if (floors.length > 1) {
+    for (const kind of ['elevator', 'escalator'] as const) {
+      const units: Unit[] = mapData
+        .getByType('connection')
+        .filter(c => c.type === kind)
+        .flatMap(c => c.coordinates)
+        .filter(c => c.floorId && onFloors.has(c.floorId))
+        .map(c => ({ target: c, center: c, floor: floorById.get(c.floorId!)! }));
+      const name = kind === 'elevator' ? 'Elevator' : 'Escalator';
+      addStore(byName, { id: `connection-${kind}`, name, categories: ['Getting around'], description: '', units });
     }
   }
 
@@ -123,20 +152,28 @@ function isParking(loc: EnterpriseLocation): boolean {
   return loc.categories.some(c => /parking/i.test(c.name)) || /\bparking\b/i.test(loc.name);
 }
 
-function addStore(
-  byName: Map<string, Store>,
-  s: Omit<Store, 'frontage' | 'haystack'>,
-) {
+function addStore(byName: Map<string, Store>, s: Omit<Store, 'frontage' | 'haystack'>) {
+  if (!s.units.length) return;
+  const frontage = s.units.flatMap(unitFrontage);
   const key = s.name.toLowerCase();
-  if (byName.has(key)) return; // one entry per brand, even if it has several units
-  const doors = s.space.doors.map(d => d.center);
-  byName.set(key, {
-    ...s,
-    // No door data (common in enterprise CMS maps): use the store's outline, so a big store's
-    // storefront still counts as "on the route" even though its center is far from the hallway.
-    frontage: doors.length ? doors : outlineOf(s.space),
-    haystack: [s.name, ...s.categories].join(' ').toLowerCase(),
-  });
+  const existing = byName.get(key);
+  if (existing) {
+    // Same name, another place (a second restroom, a brand with two units): one entry, more units.
+    existing.units.push(...s.units);
+    existing.frontage.push(...frontage);
+    return;
+  }
+  byName.set(key, { ...s, frontage, haystack: [s.name, ...s.categories].join(' ').toLowerCase() });
+}
+
+/** What you see of a unit from the corridor: its doors, else its outline, else the point itself. */
+function unitFrontage(u: Unit): Coordinate[] {
+  const space = u.target as Space;
+  if (!u.spaceId) return [u.center];
+  const doors = space.doors.map(d => d.center);
+  // No door data (common in enterprise CMS maps): use the store's outline, so a big store's
+  // storefront still counts as "on the route" even though its center is far from the hallway.
+  return doors.length ? doors : outlineOf(space);
 }
 
 /**
@@ -205,8 +242,11 @@ function entranceVestibules(mapData: MapData, stores: Store[]): Entrance[] {
   return loc.spaces
     .map((space): Entrance | undefined => {
       const nearest = stores
-        .filter(s => s.space.floor.id === space.floor.id && !/entrance|atm|restroom|washroom/i.test(s.name))
-        .map(s => ({ s, d: Math.min(...s.frontage.map(f => distanceM(f, space.center))) }))
+        .filter(s => !/entrance|atm|restroom|washroom|elevator|escalator/i.test(s.name))
+        .map(s => {
+          const sameLevel = s.frontage.filter(f => f.floorId === space.floor.id);
+          return { s, d: sameLevel.length ? Math.min(...sameLevel.map(f => distanceM(f, space.center))) : Infinity };
+        })
         .sort((a, b) => a.d - b.d)[0];
       let name = nearest ? `Entrance by ${nearest.s.name}` : 'Mall entrance';
       if (multiLevel) name += ` · ${space.floor.name}`;
@@ -250,7 +290,7 @@ function entranceDoors(mapData: MapData, floor: Floor, stores: Store[]): Entranc
   // One entrance per name: the map's own name if it has one ("Food Court Entrance"),
   // otherwise the compass side. Where several doors share a name, keep the one farthest
   // out, which is the main doorway on that side.
-  const middle: LatLng = centroid(stores.map(s => s.space.center));
+  const middle: LatLng = centroid(stores.map(s => s.units[0].center));
   const byName = new Map<string, { door: Door; dist: number }>();
   for (const door of doors) {
     const mapName = door.name?.trim();

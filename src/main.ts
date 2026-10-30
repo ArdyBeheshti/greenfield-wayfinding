@@ -1,16 +1,20 @@
 import '@mappedin/mappedin-js/lib/index.css';
 import './style.css';
 
-import { show3dMap, type Coordinate, type Directions, type Floor, type MapData, type MapView, type Marker, type Path } from '@mappedin/mappedin-js';
+import { show3dMap, type Coordinate, type Directions, type Floor, type MapData, type MapView, type Marker, type Path, type TNavigationTarget } from '@mappedin/mappedin-js';
 import { loadMapData } from './cache';
 import { DEFAULT_VENUE, VENUE, WALK_SPEED_MPS } from './config';
 import { buildSteps, storesPassed, type Step } from './directions';
-import { bearingDeg, formatDistance, formatWalk } from './geo';
+import { bearingDeg, distanceM, formatDistance, formatWalk } from './geo';
 import { ICON, STEP_ICONS } from './icons';
 import { runQa, summarize, toCsv, type QaRow } from './qa';
 import { searchStores, topCategories } from './search';
 import { buildRoutingAreas, type RoutingAreas } from './anchors';
-import { applyTenants, buildEntrances, buildStores, pickMainFloor, type Entrance, type Store } from './venue';
+import { applyTenants, buildEntrances, buildStores, pickMainFloor, type Entrance, type Store, type Unit } from './venue';
+import { directionsTo } from './routing';
+
+/** How close a tap must land to a map icon (ATM, elevator) to count as tapping it. */
+const TAP_RADIUS_M = 8;
 
 // ---------------------------------------------------------------------------
 // State
@@ -125,8 +129,19 @@ async function boot() {
     mapView.on('floor-change', () => renderFloorSwitcher());
 
     mapView.on('click', e => {
-      const space = e.spaces?.[0];
-      const store = space && stores.find(s => s.space.id === space.id);
+      const label = e.labels?.[0];
+      const labelId = (label?.target as { id?: string } | undefined)?.id;
+      // Tapping a parking area or entrance before a route is picked means "I'm here".
+      const start = labelId && entrances.find(en => en.id === labelId || (en.target as { id?: string }).id === labelId);
+      if (start) {
+        if (state.view === 'entrance' || state.view === 'search') {
+          setEntrance(start);
+          if (destination()) void route();
+          else show('search');
+        }
+        return;
+      }
+      const store = storeAtTap(labelId, label?.text, e.spaces?.[0]?.id, e.coordinate);
       if (store) chooseStore(store);
     });
 
@@ -231,12 +246,20 @@ async function route() {
     accessible: state.accessible,
     zones: areas.zones, // route around seating areas instead of through the tables
   };
-  const legs =
-    stops.length === 1
-      ? [await mapData.getDirections(entrance.target, stops[0].space, options)]
-      : await mapData.getDirectionsMultiDestination(entrance.target, stops.map(s => s.space), options);
+  // One leg per stop, each to the nearest unit of that stop from where the last leg ended
+  // ("the restroom" means the closest one, not the first one in the data).
+  const legs: (Directions | undefined)[] = [];
+  const units: Unit[] = [];
+  let from: TNavigationTarget = entrance.target;
+  for (const stop of stops) {
+    const best = await directionsTo(mapData, from, stop, options);
+    legs.push(best?.directions);
+    if (!best) break;
+    units.push(best.unit);
+    from = best.unit.target;
+  }
 
-  if (!legs || legs.some(l => !l)) {
+  if (legs.some(l => !l)) {
     state.legs = [];
     toast(`We couldn't find a walking route to ${stops.map(s => s.name).join(', ')}. Please ask Guest Services.`);
     return show('search');
@@ -246,7 +269,7 @@ async function route() {
   state.steps = [];
   state.stepLeg = [];
   state.legs.forEach((leg, i) => {
-    const from = i === 0 ? entrance : storeAsStart(stops[i - 1]);
+    const from = i === 0 ? entrance : storeAsStart(stops[i - 1], units[i - 1]);
     const legSteps = buildSteps(leg, from, stops[i], stores, areas.anchors);
     // Name each stop so a multi-stop route reads as one trip.
     if (i > 0) {
@@ -278,8 +301,8 @@ async function route() {
 }
 
 /** A store used as the start of the next leg. */
-function storeAsStart(store: Store): Entrance {
-  return { id: store.id, name: store.name, kind: 'door', target: store.space, coordinate: store.space.center, doorways: [] };
+function storeAsStart(store: Store, unit: Unit): Entrance {
+  return { id: store.id, name: store.name, kind: 'door', target: unit.target, coordinate: unit.center, doorways: [] };
 }
 
 function moveStop(i: number, dir: -1 | 1) {
@@ -758,7 +781,51 @@ function toast(message: string) {
 
 /** "Health & Beauty · Upper Level" on multi-level venues. */
 function storeMeta(s: Store): string {
-  return [s.categories[0], floors.length > 1 ? s.space.floor.name : ''].filter(Boolean).join(' · ');
+  const levels = new Set(s.units.map(u => u.floor.id));
+  const where =
+    s.units.length > 1 ? `nearest of ${s.units.length}` : floors.length > 1 && levels.size === 1 ? s.units[0].floor.name : '';
+  return [s.categories[0], where].filter(Boolean).join(' · ');
+}
+
+/**
+ * What the shopper tapped: the room under their finger, or else a point place (ATM, elevator,
+ * taxi stand) within a few metres of the tap. Point places have an icon but no room to hit.
+ */
+function storeAtTap(
+  labelTargetId: string | undefined,
+  labelText: string | undefined,
+  spaceId: string | undefined,
+  at: Coordinate | undefined,
+): Store | undefined {
+  // A tapped label (store name, ATM pin, escalator icon) names exactly what it marks.
+  if (labelTargetId) {
+    const hit = stores.find(s => s.units.some(u => (u.target as { id?: string }).id === labelTargetId || u.spaceId === labelTargetId));
+    if (hit) return hit;
+  }
+  // Standalone pins drawn by the map but not linked to a directory entry: match by name
+  // ("Baby Changing Station in Accessible Restroom" is the Baby Changing Station).
+  if (labelText) {
+    const key = labelText.trim().toLowerCase();
+    const hit =
+      stores.find(s => s.name.toLowerCase() === key) ??
+      stores.find(s => s.name.toLowerCase() === key.replace(/\s+in\s+.*$/, ''));
+    if (hit) return hit;
+  }
+  if (spaceId) {
+    const hit = stores.find(s => s.units.some(u => u.spaceId === spaceId));
+    if (hit) return hit;
+  }
+  if (!at) return undefined;
+  const floorId = mapView.currentFloor?.id;
+  let best: { store: Store; d: number } | undefined;
+  for (const store of stores) {
+    for (const u of store.units) {
+      if (u.spaceId || u.floor.id !== floorId) continue;
+      const d = distanceM(at, u.center);
+      if (d <= TAP_RADIUS_M && (!best || d < best.d)) best = { store, d };
+    }
+  }
+  return best?.store;
 }
 
 function showFloorOf(at: Coordinate) {

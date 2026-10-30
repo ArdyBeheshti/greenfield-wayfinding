@@ -5,6 +5,7 @@
 import type { MapData } from '@mappedin/mappedin-js';
 import type { RoutingAreas } from './anchors';
 import { buildSteps } from './directions';
+import { directionsTo } from './routing';
 import { formatDistance } from './geo';
 import type { Entrance, Store } from './venue';
 
@@ -54,7 +55,7 @@ export async function runQa(
         issue: '',
       };
       try {
-        const directions = await mapData.getDirections(entrance.target, store.space, { zones: areas.zones });
+        const directions = (await directionsTo(mapData, entrance.target, store, { zones: areas.zones }))?.directions;
         if (!directions) {
           row.issue = 'No route found';
         } else {
@@ -71,7 +72,7 @@ export async function runQa(
           // Step-free check: any route that changes level must have a step-free alternative
           // that really avoids stairs and escalators.
           if (row.levelChange) {
-            const accessible = await mapData.getDirections(entrance.target, store.space, { zones: areas.zones, accessible: true });
+            const accessible = (await directionsTo(mapData, entrance.target, store, { zones: areas.zones, accessible: true }))?.directions;
             if (!accessible) {
               row.stepFree = 'none';
               issues.push('No step-free route');
