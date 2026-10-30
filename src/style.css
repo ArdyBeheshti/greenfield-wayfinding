@@ -58,7 +58,24 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--go); outlin
 }
 .sheet.is-expanded, .sheet[data-view='qa'] { max-height: 82vh; }
 .sheet[data-view='route'] { max-height: 60vh; }
-.sheet__grip { width: 40px; height: 5px; border-radius: 3px; background: var(--line); margin: 10px auto 2px; flex: none; }
+/* Grip: tap or swipe down to shrink the sheet to just the essentials, up to expand. */
+.sheet__grip { display: flex; justify-content: center; align-items: center; width: 100%; height: 26px; flex: none; touch-action: none; }
+.sheet__grip span { width: 40px; height: 5px; border-radius: 3px; background: var(--line); }
+
+/* Collapsed (phones): route shows the current step and stepper; search shows the box. */
+.sheet.is-collapsed { max-height: none; }
+.sheet.is-collapsed .route-head,
+.sheet.is-collapsed .stops,
+.sheet.is-collapsed .add-stop,
+.sheet.is-collapsed .passes,
+.sheet.is-collapsed .steps,
+.sheet.is-collapsed .chips,
+.sheet.is-collapsed .list,
+.sheet.is-collapsed .toggle,
+.sheet.is-collapsed .sub,
+.sheet.is-collapsed .hint { display: none; }
+.sheet.is-collapsed .step { margin-top: 0; }
+.sheet.is-collapsed .stepper { margin-top: 8px; }
 .sheet__body { overflow-y: auto; padding: 8px 16px 16px; -webkit-overflow-scrolling: touch; }
 
 @media (min-width: 900px) {

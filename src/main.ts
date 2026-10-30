@@ -25,6 +25,8 @@ const state = {
   origin: undefined as Entrance | undefined,
   /** Stops in walking order; the last one is the destination. */
   stops: [] as Store[],
+  /** Phones: the sheet is shrunk so the map gets the screen. */
+  collapsed: false,
   /** True while the search screen is picking a stop to add to an active route. */
   addingStop: false,
   query: '',
@@ -164,7 +166,9 @@ function hereAt(at: Coordinate): Entrance {
 async function reroute() {
   // (The add-stop search screen is open at this point, so check the route, not the view.)
   if (state.legs.length && state.stepIndex > 0 && state.steps[state.stepIndex]) {
-    const reachedLegs = state.stepLeg[state.stepIndex];
+    // Standing at a stop's arrival step means that stop is done too.
+    const atArrival = state.steps[state.stepIndex].icon === 'arrive';
+    const reachedLegs = state.stepLeg[state.stepIndex] + (atArrival ? 1 : 0);
     const reached = new Set(state.stops.slice(0, reachedLegs).map(s => s.id));
     // Keep the edited order, minus stops already visited.
     state.stops = state.stops.filter(s => !reached.has(s.id));
@@ -321,6 +325,8 @@ async function share() {
 // ---------------------------------------------------------------------------
 
 function show(view: View) {
+  // A new screen opens full; collapsing only carries across steps of the same screen.
+  if (view !== state.view) state.collapsed = false;
   state.view = view;
   // Back to the route keeps your place (route() resets to step 1 for a new route).
   if (view === 'route') goToStep(state.stepIndex);
@@ -336,6 +342,9 @@ function render() {
   };
   views[state.view]();
   $('sheet').dataset.view = state.view;
+  $('sheet').classList.toggle('is-collapsed', state.collapsed);
+  $('grip').setAttribute('aria-expanded', String(!state.collapsed));
+  $('grip').setAttribute('aria-label', state.collapsed ? 'Show more' : 'Show less');
   requestAnimationFrame(updateCameraOffsets);
 }
 
@@ -616,6 +625,28 @@ function renderQa() {
 // ---------------------------------------------------------------------------
 
 $('here').addEventListener('click', () => show('entrance'));
+
+function setCollapsed(collapsed: boolean) {
+  if (state.collapsed === collapsed) return;
+  state.collapsed = collapsed;
+  if (collapsed) $('sheet').classList.remove('is-expanded');
+  // Re-render and, on a route, re-frame the current step in the bigger map area.
+  if (state.view === 'route') goToStep(state.stepIndex);
+  else render();
+}
+
+$('grip').addEventListener('click', () => setCollapsed(!state.collapsed));
+{
+  // Swipe down on the grip to shrink the sheet, up to expand it.
+  let y0 = 0;
+  $('grip').addEventListener('touchstart', e => (y0 = e.touches[0].clientY), { passive: true });
+  $('grip').addEventListener('touchend', e => {
+    const dy = e.changedTouches[0].clientY - y0;
+    if (Math.abs(dy) < 25) return; // a tap; the click handler toggles
+    e.preventDefault(); // don't also fire the click
+    setCollapsed(dy > 0);
+  });
+}
 
 function renderNetwork() {
   const el = $('net');
