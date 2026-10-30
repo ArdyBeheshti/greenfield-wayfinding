@@ -49,3 +49,5 @@ No API key or secret is in the client code or the repo. `api/mappedin-token.js` 
 ## Known gaps
 
 See the QA checklist. In short: one store on the enterprise demo map (Urban Kids) has no walkable connection in the map data, so it can't be routed to (a data fix for the CMS, not the app); a few store names on the demo map are misspelled in the source data; and privacy browsers that clear site data can't reopen offline.
+
+"Where am I" shows your best-known position (where you started, the step you're on, or the store you just reached), because a phone has no GPS indoors. A live blue dot needs indoor positioning (Wi-Fi or beacons, e.g. Mappedin Blue Dot). The app already tracks a single "you are here" point, so a live position would plug in there.

@@ -28,6 +28,13 @@ export type VenueConfig = {
    * map's numbered units realistic, fictional tenants.
    */
   tenants?: Record<string, { name: string; category: string }>;
+  /**
+   * Corrections to the customer's map data, by the name as it appears in their CMS: typos,
+   * duplicates, wrong categories. Applied everywhere (map labels, search, directions), so the
+   * app is right today while the fix goes back to the customer for their CMS. Every entry here
+   * is a data-quality item to raise with them.
+   */
+  fixes?: Record<string, { name?: string; categories?: string[] }>;
 };
 
 export const VENUES: Record<string, VenueConfig> = {
@@ -40,6 +47,36 @@ export const VENUES: Record<string, VenueConfig> = {
     source: 'enterprise',
     allFloors: true,
     entranceNames: {},
+    fixes: {
+      // Misspelled in the CMS
+      Nordstorm: { name: 'Nordstrom', categories: ['Department Stores'] },
+      'Ashley Jewlers': { name: 'Ashley Jewelers' },
+      Sketchers: { name: 'Skechers' },
+      'Shefield & Sons': { name: 'Sheffield & Sons' },
+      'Strauss Mensware': { name: 'Strauss Menswear' },
+      'Pier 1 Import': { name: 'Pier 1 Imports' },
+      'Kiehls Since 1851': { name: "Kiehl's Since 1851" },
+      'Build -A- Bear Workshop': { name: 'Build-A-Bear Workshop', categories: ['Games & Toys', 'Kids'] },
+      'Chick-Fil-A': { name: 'Chick-fil-A' },
+      "Popeye's Chicken": { name: 'Popeyes Louisiana Kitchen' },
+      Lenscrafters: { name: 'LensCrafters' },
+      Bloomingdales: { name: "Bloomingdale's", categories: ['Department Stores'] },
+      // The same store entered twice
+      'Kernels Popcorn': { name: 'Kernels' },
+      // Filed under the wrong category
+      'Holt Renfrew': { categories: ['Department Stores'] },
+      PINK: { categories: ["Women's Fashion"] },
+      Hollister: { categories: ["Women's Fashion", "Men's Fashion"] },
+      'Urban Planet': { categories: ["Women's Fashion", "Men's Fashion"] },
+      'Champs Sports': { categories: ['Sports & Outdoors', 'Shoes'] },
+      'JD Sports': { categories: ['Sports & Outdoors', 'Shoes'] },
+      'House of Hoops': { categories: ['Shoes', 'Sports & Outdoors'] },
+      'Groovy Shoes': { categories: ['Shoes'] },
+      'Soft Moc': { categories: ['Shoes'] },
+      'Stuart Weitzman': { categories: ['Shoes', "Women's Fashion"] },
+      'Al Jaber Gallery & Cafe': { categories: ['Coffee & Tea', 'Books & Gifts'] },
+      'Al Rifai': { categories: ['Sweets & Treats', 'Coffee & Tea'] },
+    },
   },
   // "Mall Demo - Facility": has a Parking location outside the South Entrance, so routes
   // genuinely start in the parking area, per the SOW. Default.

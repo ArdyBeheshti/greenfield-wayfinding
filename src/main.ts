@@ -10,8 +10,12 @@ import { ICON, STEP_ICONS } from './icons';
 import { runQa, summarize, toCsv, type QaRow } from './qa';
 import { searchStores, topCategories } from './search';
 import { buildRoutingAreas, type RoutingAreas } from './anchors';
-import { applyTenants, buildEntrances, buildStores, pickMainFloor, type Entrance, type Store, type Unit } from './venue';
+import { applyTenants, buildEntrances, buildStores, fixedName, pickMainFloor, type Entrance, type Store, type Unit } from './venue';
 import { directionsTo } from './routing';
+
+/** Closest the camera gets: the first step shows more context, later steps get closer. */
+const START_MAX_ZOOM = 19;
+const STEP_MAX_ZOOM = 20;
 
 /** How close a tap must land to a map icon (ATM, elevator) to count as tapping it. */
 const TAP_RADIUS_M = 8;
@@ -45,6 +49,8 @@ const state = {
   showAllSteps: false,
   loadedFromCache: false,
   qaRows: [] as QaRow[],
+  /** Which unit of each stop the route goes to (the nearest restroom, the ATM by the escalator). */
+  units: [] as Unit[],
 };
 
 let mapData: MapData;
@@ -108,6 +114,11 @@ async function boot() {
       outdoorView: { enabled: false }, // outdoor tiles need network and add nothing indoors
     });
     await mapView.auto(); // store labels and tappable spaces
+    // Map labels show the corrected names too ("Nordstorm" → "Nordstrom").
+    for (const label of mapView.Labels.getAll()) {
+      const fix = fixedName(label.text);
+      if (fix.name !== label.text) mapView.updateState(label, { text: fix.name });
+    }
 
     const floor = pickMainFloor(mapData, mapView.currentFloor);
     if (floor.id !== mapView.currentFloor.id) mapView.setFloor(floor);
@@ -127,6 +138,7 @@ async function boot() {
       } as RoutingAreas);
     renderFloorSwitcher();
     mapView.on('floor-change', () => renderFloorSwitcher());
+    mapView.on('camera-change', e => updateCompass(e.bearing));
 
     mapView.on('click', e => {
       const label = e.labels?.[0];
@@ -136,6 +148,7 @@ async function boot() {
       if (start) {
         if (state.view === 'entrance' || state.view === 'search') {
           setEntrance(start);
+          showStart(start);
           if (destination()) void route();
           else show('search');
         }
@@ -155,7 +168,9 @@ async function boot() {
     // Before a route is chosen, show the whole level in the space above the sheet.
     if (state.view !== 'route' && state.view !== 'qa') {
       updateCameraOffsets();
-      void mapView.Camera.focusOn(floor, { duration: 0 });
+      // Opened from a QR sign: show where you're standing. Otherwise the whole level.
+      if (state.entrance) showStart(state.entrance);
+      else void mapView.Camera.focusOn(floor, { duration: 0 });
     }
   } catch (err) {
     console.error(err);
@@ -168,7 +183,9 @@ async function restoreFromUrl() {
   const params = new URLSearchParams(location.search);
   if (params.has('qa')) return startQa();
 
-  const from = entrances.find(e => e.id === params.get('from'));
+  const fromId = params.get('from');
+  const fromStore = stores.find(s => s.id === fromId);
+  const from = entrances.find(e => e.id === fromId) ?? (fromStore ? storeAsStart(fromStore, fromStore.units[0]) : undefined);
   const to = (params.get('to') ?? '')
     .split(',')
     .map(id => stores.find(s => s.id === id))
@@ -192,7 +209,7 @@ function setEntrance(entrance: Entrance) {
 
   showFloorOf(entrance.coordinate);
   if (hereMarker) mapView.Markers.remove(hereMarker);
-  hereMarker = mapView.Markers.add(entrance.coordinate, `<div class="pin-here" aria-label="You are here"></div>`, {
+  hereMarker = mapView.Markers.add(entrance.coordinate, `<div class="pin-wrap"><span class="heading-cone"></span><div class="pin-here" aria-label="You are here"></div></div>`, {
     rank: 'always-visible',
   });
   syncUrl();
@@ -266,6 +283,7 @@ async function route() {
   }
 
   state.legs = legs as Directions[];
+  state.units = units;
   state.steps = [];
   state.stepLeg = [];
   state.legs.forEach((leg, i) => {
@@ -274,6 +292,9 @@ async function route() {
     // Name each stop so a multi-stop route reads as one trip.
     if (i > 0) {
       legSteps[0] = { ...legSteps[0], title: `Leave ${stops[i - 1].name}`, detail: legSteps[0].detail.replace(/ into the mall,?/, '') };
+    } else if (stores.some(s => s.id === from.id)) {
+      // Starting from the store you're in ("Go somewhere else from here").
+      legSteps[0] = { ...legSteps[0], title: `Leave ${from.name}`, detail: legSteps[0].detail.replace(/ into the mall,?/, '') };
     } else if (from.id === 'here') {
       legSteps[0] = { ...legSteps[0], title: 'Continue from here', detail: legSteps[0].detail.replace(/ into the mall,?/, '') };
     }
@@ -287,7 +308,7 @@ async function route() {
     state.steps.push(...legSteps);
     state.stepLeg.push(...legSteps.map(() => i));
   });
-  const passed = new Set(stops.map(s => s.name));
+  const passed = new Set([...stops.map(s => s.name), entrance.name]);
   state.passes = [...new Set(state.legs.flatMap((leg, i) => storesPassed(leg, stops[i], stores)))]
     .filter(n => !passed.has(n))
     .slice(0, 4);
@@ -318,6 +339,23 @@ function removeStop(i: number) {
   void reroute();
 }
 
+/**
+ * Arrived, and now somewhere else: the store you're in becomes your starting point, so the
+ * next route doesn't send you back to the garage first.
+ */
+function continueFromHere() {
+  const store = destination();
+  const unit = state.units[state.units.length - 1] ?? store?.units[0];
+  if (!store || !unit) return;
+  endRoute();
+  const start = storeAsStart(store, unit);
+  setEntrance(start);
+  showStart(start);
+  state.query = '';
+  state.category = undefined;
+  show('search');
+}
+
 function endRoute() {
   clearRouteDrawing();
   if (stepMarker) mapView.Markers.remove(stepMarker);
@@ -341,7 +379,7 @@ function goToStep(i: number) {
   // Multi-level routes: show the level this step happens on (e.g. after the escalator).
   showFloorOf(step.at);
   if (stepMarker) mapView.Markers.remove(stepMarker);
-  stepMarker = mapView.Markers.add(step.at, `<div class="pin-step">${state.stepIndex + 1}</div>`, {
+  stepMarker = mapView.Markers.add(step.at, `<div class="pin-wrap"><span class="heading-cone"></span><div class="pin-step">${state.stepIndex + 1}</div></div>`, {
     rank: 'always-visible',
   });
 
@@ -354,9 +392,19 @@ function goToStep(i: number) {
   // A long stretch then runs along the tall axis of the phone instead of off its side.
   const moving = step.at !== step.until;
   const frame: Coordinate[] = moving ? [step.at, step.until] : [step.at];
+  // The first step orients you: show where you are plus the next couple of turns on this
+  // level, not just a 20 ft stretch of hallway (which zooms in so far you can't tell where
+  // you are).
+  // The first step and the arrival orient you, so they show more around you.
+  const first = state.stepIndex === 0 || step.icon === 'arrive';
+  if (first) {
+    for (const next of state.steps.slice(1, 3)) {
+      if (next.until.floorId === step.at.floorId) frame.push(next.until);
+    }
+  }
   void mapView.Camera.focusOn(frame, {
     duration: 600,
-    maxZoomLevel: 21,
+    maxZoomLevel: first ? START_MAX_ZOOM : STEP_MAX_ZOOM,
     ...(moving ? { bearing: bearingDeg(step.at, step.until) } : {}),
   });
 }
@@ -438,14 +486,16 @@ function renderEntrance() {
       ${parking.map(row).join('')}
       ${parking.length && doors.length ? '<li class="list__label">Already at the doors</li>' : ''}
       ${doors.map(row).join('')}
-    </ul>`;
+    </ul>
+    ${stepFreeChoice()}`;
+  bindStepFreeChoice();
 
   sheetBody.querySelectorAll<HTMLButtonElement>('[data-entrance]').forEach(btn =>
     btn.addEventListener('click', () => {
       const e = entrances.find(x => x.id === btn.dataset.entrance);
       if (!e) return;
       setEntrance(e);
-      void mapView.Camera.focusOn(e.coordinate, { duration: 500, maxZoomLevel: 19 });
+      showStart(e);
       state.origin = undefined;
       if (state.stops.length) void route();
       else show('search');
@@ -476,6 +526,7 @@ function renderSearch() {
       <input id="q" type="search" placeholder="Find a store" autocomplete="off" enterkeyhint="search"
         value="${esc(state.query)}" aria-label="Find a store" />
     </label>
+    ${stepFreeChoice()}
     ${chips ? `<div class="chips" role="group" aria-label="Categories">${chips}</div>` : ''}
     <ul class="list" role="list">
       ${
@@ -494,11 +545,7 @@ function renderSearch() {
               .join('')
           : `<li class="empty">No stores match "${esc(state.query)}". Try a category, or check the spelling.</li>`
       }
-    </ul>
-    <label class="toggle">
-      <input id="accessible" type="checkbox" ${state.accessible ? 'checked' : ''} />
-      <span>Step-free route (avoid stairs and escalators)</span>
-    </label>`;
+    </ul>`;
 
   const input = $<HTMLInputElement>('q');
   if (hadFocus) {
@@ -508,9 +555,14 @@ function renderSearch() {
   input.addEventListener('input', () => {
     state.query = input.value;
     state.category = undefined;
-    renderSearch();
+    // Typing into a collapsed sheet: open it so the results are visible.
+    if (state.collapsed) setCollapsed(false);
+    else renderSearch();
   });
-  input.addEventListener('focus', () => $('sheet').classList.add('is-expanded'));
+  input.addEventListener('focus', () => {
+    $('sheet').classList.add('is-expanded');
+    if (state.collapsed) setCollapsed(false);
+  });
 
   sheetBody.querySelectorAll<HTMLButtonElement>('[data-category]').forEach(btn =>
     btn.addEventListener('click', () => {
@@ -531,7 +583,23 @@ function renderSearch() {
     state.addingStop = false;
     show('route');
   });
-  $<HTMLInputElement>('accessible').addEventListener('change', e => {
+  bindStepFreeChoice();
+}
+
+/**
+ * Step-free is decided before the route, like "avoid tolls" in a car app: a wheelchair or
+ * stroller user shouldn't be shown an escalator route first. Multi-level venues only.
+ */
+function stepFreeChoice(): string {
+  if (floors.length < 2) return '';
+  return `<label class="toggle toggle--top">
+      <input id="accessible" type="checkbox" ${state.accessible ? 'checked' : ''} />
+      <span><strong>Step-free route</strong> · elevators only, no stairs or escalators</span>
+    </label>`;
+}
+
+function bindStepFreeChoice() {
+  document.getElementById('accessible')?.addEventListener('change', e => {
     state.accessible = (e.target as HTMLInputElement).checked;
     syncUrl();
   });
@@ -544,6 +612,7 @@ function renderRoute() {
   const step = steps[stepIndex];
   const total = legs.reduce((sum, l) => sum + l.distance, 0);
   const currentLeg = state.stepLeg[stepIndex] ?? 0;
+  const atEnd = stepIndex === steps.length - 1 && step?.icon === 'arrive';
   const connections = steps.filter(s => s.icon === 'connection' && s.title.startsWith('Take'));
   const changesLevel = connections.length > 0;
   const levelSummary = state.accessible ? 'step-free (elevator)' : connections.map(c => c.landmark).join(', ');
@@ -609,8 +678,10 @@ function renderRoute() {
       </button>
       <button class="icon-btn icon-btn--primary" id="next" aria-label="Next step" ${stepIndex === steps.length - 1 ? 'disabled' : ''}>${ICON.next}</button>
     </div>
+    ${atEnd ? `<button class="from-here" id="from-here">Go somewhere else from ${esc(store.name)}</button>` : ''}
     ${state.showAllSteps ? `<ol class="steps" role="list">${allSteps}</ol>` : ''}`;
 
+  document.getElementById('from-here')?.addEventListener('click', continueFromHere);
   $('prev').addEventListener('click', () => goToStep(stepIndex - 1));
   $('next').addEventListener('click', () => goToStep(stepIndex + 1));
   $('end').addEventListener('click', endRoute);
@@ -706,6 +777,63 @@ function renderQa() {
 
 $('here').addEventListener('click', () => show('entrance'));
 
+// Compass: the needle shows where north is as the map turns (heading-up routes rotate it);
+// tap to put north back at the top.
+$('compass').addEventListener('click', () => {
+  void mapView.Camera.animateTo({ bearing: 0 }, { duration: 400 });
+  void startHeading();
+});
+
+// "Where am I": there's no GPS indoors, so this is your best-known spot: the step you're on,
+// or where you started. (Live positioning needs indoor positioning hardware, e.g. Mappedin
+// Blue Dot with Wi-Fi or beacons; see README.)
+$('locate').innerHTML = ICON.locate;
+$('locate').addEventListener('click', () => {
+  void startHeading();
+  if (state.view === 'route' && state.steps.length) return goToStep(state.stepIndex);
+  if (state.entrance) return showStart(state.entrance);
+  show('entrance');
+});
+
+function updateCompass(bearing: number) {
+  $('compass-needle').style.transform = `rotate(${-bearing}deg)`;
+  mapBearing = bearing;
+  paintHeading();
+}
+
+// Phone compass (where the browser shares it): a cone on your marker shows which way you're
+// facing. iOS asks permission, which has to come from a tap, so it starts on the first tap
+// of the compass or "where am I".
+let mapBearing = 0;
+let deviceHeading: number | undefined;
+let headingStarted = false;
+async function startHeading() {
+  if (headingStarted || typeof DeviceOrientationEvent === 'undefined') return;
+  headingStarted = true;
+  const D = DeviceOrientationEvent as unknown as { requestPermission?: () => Promise<string> };
+  try {
+    if (D.requestPermission && (await D.requestPermission()) !== 'granted') return;
+  } catch {
+    return;
+  }
+  const onOrient = (e: DeviceOrientationEvent) => {
+    const ios = (e as DeviceOrientationEvent & { webkitCompassHeading?: number }).webkitCompassHeading;
+    const heading = ios ?? (e.absolute && e.alpha != null ? 360 - e.alpha : undefined);
+    if (heading == null) return;
+    deviceHeading = heading;
+    paintHeading();
+  };
+  window.addEventListener('deviceorientationabsolute' as 'deviceorientation', onOrient);
+  window.addEventListener('deviceorientation', onOrient);
+}
+
+function paintHeading() {
+  if (deviceHeading == null) return;
+  document.body.classList.add('has-heading');
+  // The cone points where you face relative to the map as it's currently turned.
+  document.body.style.setProperty('--heading', `${deviceHeading - mapBearing}deg`);
+}
+
 function setCollapsed(collapsed: boolean) {
   if (state.collapsed === collapsed) return;
   state.collapsed = collapsed;
@@ -788,6 +916,24 @@ function storeMeta(s: Store): string {
 }
 
 /**
+ * Frame a starting point with enough of the mall around it to get your bearings: the start
+ * plus the nearest storefronts on that level. From a parking lot that brings the building
+ * edge and its entrance into view instead of a screen of empty asphalt.
+ */
+function showStart(e: Entrance) {
+  const floorId = e.coordinate.floorId;
+  const nearby = stores
+    .flatMap(s => s.units)
+    .filter(u => u.spaceId && (!floorId || u.floor.id === floorId))
+    .map(u => ({ at: u.center, d: distanceM(u.center, e.coordinate) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, 6)
+    .map(x => x.at);
+  updateCameraOffsets();
+  void mapView.Camera.focusOn([e.coordinate, ...nearby], { duration: 500, maxZoomLevel: START_MAX_ZOOM });
+}
+
+/**
  * What the shopper tapped: the room under their finger, or else a point place (ATM, elevator,
  * taxi stand) within a few metres of the tap. Point places have an icon but no room to hit.
  */
@@ -805,7 +951,7 @@ function storeAtTap(
   // Standalone pins drawn by the map but not linked to a directory entry: match by name
   // ("Baby Changing Station in Accessible Restroom" is the Baby Changing Station).
   if (labelText) {
-    const key = labelText.trim().toLowerCase();
+    const key = fixedName(labelText).name.trim().toLowerCase();
     const hit =
       stores.find(s => s.name.toLowerCase() === key) ??
       stores.find(s => s.name.toLowerCase() === key.replace(/\s+in\s+.*$/, ''));

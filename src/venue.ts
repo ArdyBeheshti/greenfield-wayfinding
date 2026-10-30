@@ -5,6 +5,7 @@
 import { Coordinate } from '@mappedin/mappedin-js';
 import type { Door, EnterpriseLocation, Floor, MapData, Space, TNavigationTarget } from '@mappedin/mappedin-js';
 import { VENUE } from './config';
+import { classify, searchTags } from './categories';
 import { bearingDeg, centroid, compassName, distanceM, type LatLng } from './geo';
 
 /** One physical place a directory entry can be: a store unit, an ATM, one of the restrooms. */
@@ -25,8 +26,8 @@ export type Store = {
   units: Unit[];
   /** Points a shopper would see from the corridor, on every unit: doors if mapped, else the outline. */
   frontage: Coordinate[];
-  /** Pre-lowercased text used by search. */
-  haystack: string;
+  /** Hidden search words ("pizza", "food") beyond the name and categories. */
+  tags: string[];
 };
 
 export type Entrance = {
@@ -79,8 +80,15 @@ export function applyTenants(mapData: MapData): void {
   }
 }
 
+/** The corrected name, and override categories, for a name as it appears in the CMS. */
+export function fixedName(name: string): { name: string; categories?: string[] } {
+  const f = VENUE.fixes?.[name.trim()];
+  return { name: f?.name ?? name, categories: f?.categories };
+}
+
 export function buildStores(mapData: MapData, floors: Floor[]): Store[] {
   const byName = new Map<string, Store>();
+  indexRooms(mapData); // for telling storefronts from shared walls
   const onFloors = new Set(floors.map(f => f.id));
   const floorById = new Map(mapData.getByType('floor').map(f => [f.id, f]));
   const spaceUnits = (spaces: Space[]): Unit[] =>
@@ -152,8 +160,11 @@ function isParking(loc: EnterpriseLocation): boolean {
   return loc.categories.some(c => /parking/i.test(c.name)) || /\bparking\b/i.test(loc.name);
 }
 
-function addStore(byName: Map<string, Store>, s: Omit<Store, 'frontage' | 'haystack'>) {
-  if (!s.units.length) return;
+function addStore(byName: Map<string, Store>, raw: Omit<Store, 'frontage' | 'tags'>) {
+  if (!raw.units.length) return;
+  const fix = fixedName(raw.name);
+  const categories = classify(fix.name, raw.categories, raw.description, fix.categories);
+  const s = { ...raw, name: fix.name, categories };
   const frontage = s.units.flatMap(unitFrontage);
   const key = s.name.toLowerCase();
   const existing = byName.get(key);
@@ -163,7 +174,7 @@ function addStore(byName: Map<string, Store>, s: Omit<Store, 'frontage' | 'hayst
     existing.frontage.push(...frontage);
     return;
   }
-  byName.set(key, { ...s, frontage, haystack: [s.name, ...s.categories].join(' ').toLowerCase() });
+  byName.set(key, { ...s, frontage, tags: searchTags(s.name, categories, s.description) });
 }
 
 /** What you see of a unit from the corridor: its doors, else its outline, else the point itself. */
@@ -307,18 +318,93 @@ function entranceDoors(mapData: MapData, floor: Floor, stores: Store[]): Entranc
 
 /** Points every ~3 m around a space's outline (falls back to its center). */
 function outlineOf(space: Space): Coordinate[] {
-  const ring = (space.geoJSON?.geometry as { type: string; coordinates: number[][][] } | undefined)?.type === 'Polygon'
-    ? (space.geoJSON!.geometry as { coordinates: number[][][] }).coordinates[0]
-    : undefined;
-  if (!ring || ring.length < 3) return [space.center];
+  const ring = ringOf(space);
+  if (!ring) return [space.center];
   const floorId = space.floor.id;
-  const pts: Coordinate[] = [];
+  const all: Coordinate[] = [];
+  const facing: Coordinate[] = [];
   for (let i = 0; i < ring.length - 1; i++) {
     const [lng1, lat1] = ring[i];
     const [lng2, lat2] = ring[i + 1];
     const a = new Coordinate(lat1, lng1, floorId);
-    const n = Math.max(1, Math.round(distanceM(a, new Coordinate(lat2, lng2, floorId)) / 3));
-    for (let k = 0; k < n; k++) pts.push(new Coordinate(lat1 + ((lat2 - lat1) * k) / n, lng1 + ((lng2 - lng1) * k) / n, floorId));
+    const len = distanceM(a, new Coordinate(lat2, lng2, floorId));
+    const n = Math.max(1, Math.round(len / 3));
+    // Unit normal to this wall, in degrees per metre, so we can step just outside it.
+    const mPerLat = 111_320;
+    const mPerLng = 111_320 * Math.cos((lat1 * Math.PI) / 180);
+    const dx = ((lng2 - lng1) * mPerLng) / (len || 1);
+    const dy = ((lat2 - lat1) * mPerLat) / (len || 1);
+    for (let k = 0; k < n; k++) {
+      const lat = lat1 + ((lat2 - lat1) * (k + 0.5)) / n;
+      const lng = lng1 + ((lng2 - lng1) * (k + 0.5)) / n;
+      const p = new Coordinate(lat, lng, floorId);
+      all.push(p);
+      // Step 1.2 m off the wall on both sides; the side that isn't inside this store is
+      // "outside". If outside is another room (a neighbour, a stockroom), it's a shared wall,
+      // not a storefront. If it's open floor, shoppers walking by can see in.
+      const sides = [1, -1].map(sign => [lng + (sign * -dy * WALL_STEP_M) / mPerLng, lat + (sign * dx * WALL_STEP_M) / mPerLat]);
+      const out = sides.find(([x, y]) => !inRing(x, y, ring));
+      if (out && !insideAnyRoom(out[0], out[1], floorId, space.id)) facing.push(p);
+    }
   }
-  return pts;
+  // A store with no open side in the data (fully boxed in) falls back to its whole outline.
+  return facing.length ? facing : all;
+}
+
+/** How far past a wall to look when deciding if it faces the walkway. */
+const WALL_STEP_M = 1.2;
+
+type Ring = number[][];
+let roomIndex: Map<string, { id: string; ring: Ring; box: [number, number, number, number] }[]> | undefined;
+
+/** Every room on the map, by level, with a bounding box for quick rejection. */
+function indexRooms(mapData: MapData) {
+  roomIndex = new Map();
+  for (const sp of mapData.getByType('space')) {
+    if (sp.type !== 'room') continue;
+    const ring = ringOf(sp);
+    if (!ring) continue;
+    const xs = ring.map(p => p[0]);
+    const ys = ring.map(p => p[1]);
+    const list = roomIndex.get(sp.floor.id) ?? [];
+    list.push({ id: sp.id, ring, box: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)] });
+    roomIndex.set(sp.floor.id, list);
+  }
+  // Some maps draw the concourse floor (or a building shell) as one big room with the stores
+  // on top of it. A room that contains another room's center is floor, not a neighbouring wall.
+  for (const [floorId, list] of roomIndex) {
+    const containsAnother = (r: { id: string; ring: Ring }) =>
+      list.some(o => {
+        if (o.id === r.id) return false;
+        const cx = (o.box[0] + o.box[2]) / 2;
+        const cy = (o.box[1] + o.box[3]) / 2;
+        return inRing(cx, cy, r.ring);
+      });
+    roomIndex.set(floorId, list.filter(r => !containsAnother(r)));
+  }
+}
+
+function insideAnyRoom(x: number, y: number, floorId: string, except: string): boolean {
+  for (const r of roomIndex?.get(floorId) ?? []) {
+    if (r.id === except || x < r.box[0] || x > r.box[2] || y < r.box[1] || y > r.box[3]) continue;
+    if (inRing(x, y, r.ring)) return true;
+  }
+  return false;
+}
+
+function ringOf(space: Space): Ring | undefined {
+  const g = space.geoJSON?.geometry as { type: string; coordinates: number[][][] } | undefined;
+  const ring = g?.type === 'Polygon' ? g.coordinates[0] : undefined;
+  return ring && ring.length >= 4 ? ring : undefined;
+}
+
+/** Ray casting point-in-polygon on [lng, lat] pairs. */
+function inRing(x: number, y: number, ring: Ring): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i];
+    const [xj, yj] = ring[j];
+    if (yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
 }

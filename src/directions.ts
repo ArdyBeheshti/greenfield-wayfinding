@@ -54,7 +54,8 @@ export function buildSteps(
   const legs = simplify(directions.instructions);
   // A map pin (ATM, elevator, taxi stand) rather than a room you walk into.
   const isPin = to.units.every(u => !u.spaceId);
-  const candidates = stores.filter(s => s.id !== to.id);
+  // Neither the store you're going to nor the one you're leaving is a landmark on the way.
+  const candidates = stores.filter(s => s.id !== to.id && s.id !== from.id);
   // Other units of the destination (another ATM) aren't landmarks on the way to "the ATM".
   const bare = (n: string) => n.toLowerCase().replace(/^the /, '');
   anchors = anchors.filter(a => bare(a.name) !== bare(to.name));

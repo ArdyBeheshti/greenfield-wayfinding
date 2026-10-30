@@ -19,7 +19,13 @@
         <span class="here__change">Change</span>
       </button>
       <div id="net" class="net" role="status" hidden></div>
-      <nav id="floors" class="floors" aria-label="Levels" hidden></nav>
+      <div class="map-controls">
+        <nav id="floors" class="floors" aria-label="Levels" hidden></nav>
+        <button id="compass" class="map-btn compass" type="button" aria-label="Point the map north">
+          <span class="compass__needle" id="compass-needle" aria-hidden="true"><span>N</span></span>
+        </button>
+        <button id="locate" class="map-btn" type="button" aria-label="Show where I am"></button>
+      </div>
     </header>
 
     <section id="sheet" class="sheet" aria-live="polite">

@@ -8,6 +8,7 @@
 // Customer-defined areas (center court, kids' play area) would be added here the same way.
 
 import type { Floor, MapData, TDirectionZone } from '@mappedin/mappedin-js';
+import { fixedName } from './venue';
 import { distanceM, type LatLng } from './geo';
 
 export type Anchor = {
@@ -64,12 +65,12 @@ export function buildRoutingAreas(
     const ring = buffer(convexHull(cluster.flatMap(p => p.ring)), BUFFER_M);
     const center = average(ring);
     const poi = pois
-      .map(p => ({ name: p.name.trim(), d: distanceM(center, p.coordinate) }))
+      .map(p => ({ name: fixedName(p.name).name.trim(), d: distanceM(center, p.coordinate) }))
       .filter(p => p.d <= NAME_FROM_POI_M)
       .sort((a, b) => a.d - b.d)[0];
     const store = mapData
       .getByType('location-profile')
-      .flatMap(lp => lp.spaces.filter(sp => sp.floor.id === floor.id).map(sp => ({ name: lp.name.trim(), d: distanceM(center, sp.center) })))
+      .flatMap(lp => lp.spaces.filter(sp => sp.floor.id === floor.id).map(sp => ({ name: fixedName(lp.name).name.trim(), d: distanceM(center, sp.center) })))
       .sort((a, b) => a.d - b.d)[0];
     const name = poi ? `${poi.name} seating` : store ? `the seating near ${store.name}` : 'the seating area';
     anchors.push({ name, kind: 'area', floorId: floor.id, ring, center });
@@ -81,7 +82,7 @@ export function buildRoutingAreas(
   for (const p of pois) {
     if (/parking|garage|entrance/i.test(p.name)) continue;
     const c = p.coordinate;
-    anchors.push({ name: `the ${p.name.trim()}`, kind: 'point', floorId: floor.id, ring: [c, c], center: c });
+    anchors.push({ name: `the ${fixedName(p.name).name.trim()}`, kind: 'point', floorId: floor.id, ring: [c, c], center: c });
   }
 
   const zones: TDirectionZone[] = seatingAreas.map(a => ({
