@@ -1,0 +1,20 @@
+{
+  "name": "greenfield-wayfinding",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Greenfield Mall wayfinding web app built on the Mappedin JS SDK (FDE assignment).",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@mappedin/mappedin-js": "^6.30.0"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}

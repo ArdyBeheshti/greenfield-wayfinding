@@ -1,0 +1,8 @@
+{
+  "name": "Greenfield Mall Directions",
+  "short_name": "Greenfield",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#0F1B2D"
+}

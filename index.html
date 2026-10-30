@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0F1B2D" />
+    <meta name="description" content="Find any store at Greenfield Mall and get walking directions from your entrance." />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>Greenfield Mall · Directions</title>
+  </head>
+  <body>
+    <div id="map" aria-label="Mall map"></div>
+
+    <header class="topbar">
+      <button id="here" class="here" type="button" hidden>
+        <span class="here__dot" aria-hidden="true"></span>
+        <span class="here__label">You are here</span>
+        <span id="here-name" class="here__name"></span>
+        <span class="here__change">Change</span>
+      </button>
+      <div id="net" class="net" role="status" hidden></div>
+    </header>
+
+    <section id="sheet" class="sheet" aria-live="polite">
+      <div class="sheet__grip" aria-hidden="true"></div>
+      <div id="sheet-body" class="sheet__body"></div>
+    </section>
+
+    <div id="loading" class="loading">
+      <div class="loading__mark" aria-hidden="true"></div>
+      <p id="loading-text">Loading the mall map…</p>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

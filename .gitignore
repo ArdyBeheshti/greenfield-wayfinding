@@ -1,0 +1,20 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Vercel project link (local deploy settings)
+.vercel/
+
+# Local route-check exports
+route-check*.csv
+*.csv
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+.env
+.env.*
+!.env.example
