@@ -1,7 +1,7 @@
 import '@mappedin/mappedin-js/lib/index.css';
 import './style.css';
 
-import { show3dMap, type Coordinate, type Directions, type MapData, type MapView, type Marker, type Path } from '@mappedin/mappedin-js';
+import { show3dMap, type Coordinate, type Directions, type Floor, type MapData, type MapView, type Marker, type Path } from '@mappedin/mappedin-js';
 import { loadMapData } from './cache';
 import { DEFAULT_VENUE, VENUE, WALK_SPEED_MPS } from './config';
 import { buildSteps, storesPassed, type Step } from './directions';
@@ -48,6 +48,7 @@ let mapView: MapView;
 let stores: Store[] = [];
 let entrances: Entrance[] = [];
 let categories: string[] = [];
+let floors: Floor[] = [];
 let areas: RoutingAreas = { anchors: [], zones: [] };
 let hereMarker: Marker | undefined;
 let stepMarker: Marker | undefined;
@@ -93,7 +94,7 @@ const sheetBody = $('sheet-body');
 
 async function boot() {
   try {
-    const loaded = await loadMapData(VENUE);
+    const loaded = await loadMapData({ mapId: VENUE.mapId, source: VENUE.source });
     mapData = loaded.mapData;
     state.loadedFromCache = loaded.source === 'cache';
 
@@ -107,10 +108,21 @@ async function boot() {
     const floor = pickMainFloor(mapData, mapView.currentFloor);
     if (floor.id !== mapView.currentFloor.id) mapView.setFloor(floor);
 
-    stores = buildStores(mapData, floor);
+    floors = VENUE.allFloors
+      ? [...mapData.getByType('floor')].sort((a, b) => b.elevation - a.elevation) // top level first
+      : [floor];
+    stores = buildStores(mapData, floors);
     entrances = buildEntrances(mapData, floor, stores);
     categories = topCategories(stores);
-    areas = buildRoutingAreas(mapData, floor);
+    // Seating areas and landmarks on every level we route across.
+    areas = floors
+      .map(f => buildRoutingAreas(mapData, f))
+      .reduce((all, a) => ({ anchors: [...all.anchors, ...a.anchors], zones: [...all.zones, ...a.zones] }), {
+        anchors: [],
+        zones: [],
+      } as RoutingAreas);
+    renderFloorSwitcher();
+    mapView.on('floor-change', () => renderFloorSwitcher());
 
     mapView.on('click', e => {
       const space = e.spaces?.[0];
@@ -163,6 +175,7 @@ function setEntrance(entrance: Entrance) {
   $('here-name').textContent = entrance.name;
   $('here').hidden = false;
 
+  showFloorOf(entrance.coordinate);
   if (hereMarker) mapView.Markers.remove(hereMarker);
   hereMarker = mapView.Markers.add(entrance.coordinate, `<div class="pin-here" aria-label="You are here"></div>`, {
     rank: 'always-visible',
@@ -302,6 +315,8 @@ function goToStep(i: number) {
   if (!step) return render();
   void drawLeg(state.stepLeg[state.stepIndex] ?? 0);
 
+  // Multi-level routes: show the level this step happens on (e.g. after the escalator).
+  showFloorOf(step.at);
   if (stepMarker) mapView.Markers.remove(stepMarker);
   stepMarker = mapView.Markers.add(step.at, `<div class="pin-step">${state.stepIndex + 1}</div>`, {
     rank: 'always-visible',
@@ -449,7 +464,7 @@ function renderSearch() {
                   <span class="row__icon">${ICON.store}</span>
                   <span class="row__text">
                     <span class="row__title">${esc(s.name)}</span>
-                    ${s.categories[0] ? `<span class="row__meta">${esc(s.categories[0])}</span>` : ''}
+                    ${storeMeta(s) ? `<span class="row__meta">${esc(storeMeta(s))}</span>` : ''}
                   </span>
                 </button></li>`,
               )
@@ -506,6 +521,15 @@ function renderRoute() {
   const step = steps[stepIndex];
   const total = legs.reduce((sum, l) => sum + l.distance, 0);
   const currentLeg = state.stepLeg[stepIndex] ?? 0;
+  const connections = steps.filter(s => s.icon === 'connection' && s.title.startsWith('Take'));
+  const changesLevel = connections.length > 0;
+  const levelSummary = state.accessible ? 'step-free (elevator)' : connections.map(c => c.landmark).join(', ');
+  // Offer step-free whenever the route changes level, or the venue has more than one.
+  const stepFreeToggle =
+    changesLevel || floors.length > 1
+      ? `<label class="toggle toggle--route"><input id="route-accessible" type="checkbox" ${state.accessible ? 'checked' : ''} />
+          <span>Step-free route${changesLevel && !state.accessible ? ' (avoid escalators and stairs)' : ''}</span></label>`
+      : '';
 
   const stopList =
     stops.length > 1
@@ -535,13 +559,14 @@ function renderRoute() {
     <div class="route-head">
       <div>
         <h1 class="title">${stops.length > 1 ? `${stops.length} stops` : esc(store.name)}</h1>
-        <p class="sub">${formatWalk(total, WALK_SPEED_MPS)} · ${formatDistance(total)}${state.accessible ? ' · step-free' : ''}</p>
+        <p class="sub">${formatWalk(total, WALK_SPEED_MPS)} · ${formatDistance(total)}${changesLevel ? ` · ${levelSummary}` : ''}</p>
       </div>
       <div class="route-head__actions">
         <button class="icon-btn" id="share" aria-label="Share directions">${ICON.share}</button>
         <button class="icon-btn" id="end" aria-label="End directions">${ICON.close}</button>
       </div>
     </div>
+    ${stepFreeToggle}
     ${stopList}
     <button class="link-btn add-stop" id="add-stop">+ Add a stop</button>
     ${state.passes.length ? `<p class="passes">On the way: ${state.passes.map(esc).join(', ')}</p>` : ''}
@@ -567,6 +592,10 @@ function renderRoute() {
   $('next').addEventListener('click', () => goToStep(stepIndex + 1));
   $('end').addEventListener('click', endRoute);
   $('share').addEventListener('click', () => void share());
+  document.getElementById('route-accessible')?.addEventListener('change', e => {
+    state.accessible = (e.target as HTMLInputElement).checked;
+    void reroute();
+  });
   $('add-stop').addEventListener('click', () => {
     state.addingStop = true;
     state.query = '';
@@ -725,6 +754,34 @@ function toast(message: string) {
   el.classList.add('is-on');
   clearTimeout(toastTimer);
   toastTimer = window.setTimeout(() => el!.classList.remove('is-on'), 3200);
+}
+
+/** "Health & Beauty · Upper Level" on multi-level venues. */
+function storeMeta(s: Store): string {
+  return [s.categories[0], floors.length > 1 ? s.space.floor.name : ''].filter(Boolean).join(' · ');
+}
+
+function showFloorOf(at: Coordinate) {
+  if (at.floorId && mapView.currentFloor?.id !== at.floorId) mapView.setFloor(at.floorId);
+}
+
+/** Level buttons (multi-level venues only), top level first like an elevator panel. */
+function renderFloorSwitcher() {
+  const el = $('floors');
+  if (floors.length < 2) {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  el.innerHTML = floors
+    .map(
+      f => `<button class="floor ${mapView.currentFloor?.id === f.id ? 'is-on' : ''}" data-floor="${esc(f.id)}"
+        aria-pressed="${mapView.currentFloor?.id === f.id}" aria-label="${esc(f.name)}">${esc(f.shortName || f.name)}</button>`,
+    )
+    .join('');
+  el.querySelectorAll<HTMLButtonElement>('[data-floor]').forEach(btn =>
+    btn.addEventListener('click', () => mapView.setFloor(btn.dataset.floor!)),
+  );
 }
 
 function waitForSize(el: HTMLElement): Promise<void> {

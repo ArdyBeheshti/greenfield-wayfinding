@@ -10,6 +10,14 @@ export type VenueConfig = {
   name: string;
   mapId: string;
   /**
+   * 'maker': a map built in Mappedin Maker (API key auth, location profiles).
+   * 'enterprise': a map managed in the Mappedin CMS (client-credential auth, enterprise
+   * locations and categories, typically multi-level).
+   */
+  source?: 'maker' | 'enterprise';
+  /** Route across every level, not just the main one. */
+  allFloors?: boolean;
+  /**
    * Starting points by map ID → the name on the sign. Leave empty to derive them from the
    * map: parking locations first, then exterior doors that open into a hallway.
    */
@@ -23,6 +31,16 @@ export type VenueConfig = {
 };
 
 export const VENUES: Record<string, VenueConfig> = {
+  // "Mappedin Demo Mall" (enterprise CMS): two levels, 250+ tenants, escalators and elevators,
+  // a two-level parking garage and two surface lots. The full-capability showcase.
+  mall: {
+    id: 'mall',
+    name: 'Greenfield Mall',
+    mapId: 'mappedin-demo-mall',
+    source: 'enterprise',
+    allFloors: true,
+    entranceNames: {},
+  },
   // "Mall Demo - Facility": has a Parking location outside the South Entrance, so routes
   // genuinely start in the parking area, per the SOW. Default.
   facility: {
@@ -59,7 +77,7 @@ export const VENUES: Record<string, VenueConfig> = {
   consumer: { id: 'consumer', name: 'Greenfield Mall', mapId: '660c0c6e7c0c4fe5b4cc484c', entranceNames: {} },
 };
 
-export const DEFAULT_VENUE = 'facility';
+export const DEFAULT_VENUE = 'mall';
 
 /** The venue for this page load: ?venue=<id>, else the default. */
 export const VENUE: VenueConfig =

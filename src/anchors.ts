@@ -14,6 +14,8 @@ export type Anchor = {
   name: string;
   /** 'area' = an outlined zone like seating; 'point' = a named spot like the information desk. */
   kind: 'area' | 'point';
+  /** Level the anchor is on; landmarks are only used on the same level. */
+  floorId: string;
   /** Outline (closed ring), used to test whether a route passes or turns beside it. */
   ring: LatLng[];
   center: LatLng;
@@ -70,7 +72,7 @@ export function buildRoutingAreas(
       .flatMap(lp => lp.spaces.filter(sp => sp.floor.id === floor.id).map(sp => ({ name: lp.name.trim(), d: distanceM(center, sp.center) })))
       .sort((a, b) => a.d - b.d)[0];
     const name = poi ? `${poi.name} seating` : store ? `the seating near ${store.name}` : 'the seating area';
-    anchors.push({ name, kind: 'area', ring, center });
+    anchors.push({ name, kind: 'area', floorId: floor.id, ring, center });
   }
 
   // Named points of interest (information desk, water fountain, washrooms) are good
@@ -79,7 +81,7 @@ export function buildRoutingAreas(
   for (const p of pois) {
     if (/parking|garage|entrance/i.test(p.name)) continue;
     const c = p.coordinate;
-    anchors.push({ name: `the ${p.name.trim()}`, kind: 'point', ring: [c, c], center: c });
+    anchors.push({ name: `the ${p.name.trim()}`, kind: 'point', floorId: floor.id, ring: [c, c], center: c });
   }
 
   const zones: TDirectionZone[] = seatingAreas.map(a => ({

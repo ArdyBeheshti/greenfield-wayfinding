@@ -61,6 +61,7 @@ export function buildSteps(
   // The door is the destination's own outside door: there's no "going inside" first.
   const entryIsDestination = !!entry && distanceM(entry.coordinate, route[route.length - 1]) < 8;
 
+  let arrivingFloor: string | undefined;
   legs.forEach(({ ins }, i) => {
     // The SDK's distance is the walk *to* an instruction, so the walk after this step
     // is the next instruction's leg.
@@ -105,7 +106,7 @@ export function buildSteps(
           ? undefined
           : outside
             ? { phrase: `toward the ${entry!.name}`, store: entry!.name }
-            : (describeTurnSpot(ins.coordinate, directions.coordinates, bearing, candidates) ??
+            : (describeTurnSpot(ins.coordinate, directions.coordinates, bearing, sameFloor(candidates, ins.coordinate)) ??
               describeTurnAtAnchor(ins.coordinate, anchors));
         steps.push({
           icon: b.icon,
@@ -125,16 +126,34 @@ export function buildSteps(
         });
         break;
       }
-      case 'TakeConnection':
-      case 'ExitConnection': {
-        const kind = ins.action.connection?.type ?? 'connection';
+      case 'TakeConnection': {
+        // "Take the escalator up to Upper Level": the kind, the direction and where it goes.
+        const kind = ins.action.connection?.type ?? ins.action.connectionType ?? 'stairs';
+        arrivingFloor = ins.action.toFloor?.name;
+        const dir = ins.action.direction === 'up' ? ' up' : ins.action.direction === 'down' ? ' down' : '';
+        const toFloor = ins.action.toFloor?.name;
         steps.push({
           icon: 'connection',
-          title: ins.action.type === 'TakeConnection' ? `Take the ${kind}` : `Exit the ${kind}`,
+          title: `Take the ${kind}${dir}${toFloor ? ` to ${toFloor}` : ''}`,
+          detail: kind === 'elevator' ? 'Step-free' : kind === 'escalator' ? 'Stand right, walk left' : '',
+          at: ins.coordinate,
+          until: next,
+          distance: after,
+          landmark: kind,
+        });
+        break;
+      }
+      case 'ExitConnection': {
+        // The level you step off on is where the matching "Take the …" step was heading.
+        const floorName = arrivingFloor;
+        steps.push({
+          icon: 'connection',
+          title: floorName ? `Step off on ${floorName}` : 'Step off',
           detail: walk,
           at: ins.coordinate,
           until: next,
           distance: after,
+          landmark: floorName,
         });
         break;
       }
@@ -151,6 +170,20 @@ export function buildSteps(
     }
   });
 
+  // "Step off on Upper Level" then a turn a few steps later is one move:
+  // "Step off on Upper Level, then turn left before Sephora".
+  for (let i = steps.length - 2; i >= 0; i--) {
+    const off = steps[i];
+    const turn = steps[i + 1];
+    if (!off.title.startsWith('Step off') || off.distance >= 10) continue;
+    if (!['left', 'right', 'slight-left', 'slight-right', 'back'].includes(turn.icon)) continue;
+    steps.splice(i, 2, {
+      ...turn,
+      title: `${off.title}, then ${turn.title.charAt(0).toLowerCase()}${turn.title.slice(1)}`,
+      landmark: turn.landmark ?? off.landmark,
+    });
+  }
+
   // What you walk past on each stretch, so a long "Walk 290 ft" reads like
   // "Walk 290 ft past Soap Stop and Drug Store" and you know you're still on track.
   steps.forEach((step, i) => {
@@ -158,7 +191,7 @@ export function buildSteps(
     // Outside the building you can't see what's inside the walls.
     if (entry && metersAlong(route, distanceToPolylineM(step.until, route).index) <= entryAlongM + 2) return;
     const mentioned = [step.title, steps[i + 1]?.title ?? ''].join(' ');
-    const passing = passedOnLeg(directions.coordinates, step.at, step.until, candidates, anchors)
+    const passing = passedOnLeg(directions.coordinates, step.at, step.until, sameFloor(candidates, step.at), anchors)
       .filter(name => !mentioned.includes(name))
       .slice(0, 2);
     if (!passing.length) return;
@@ -337,7 +370,7 @@ function describeTurnSpot(
 }
 
 function describeTurnAtAnchor(at: Coordinate, anchors: Anchor[]): { phrase: string; store: string } | undefined {
-  const a = anchors.find(x => distanceToAnchorM(at, x) <= (x.kind === 'point' ? 10 : 6));
+  const a = anchors.find(x => (!at.floorId || x.floorId === at.floorId) && distanceToAnchorM(at, x) <= (x.kind === 'point' ? 10 : 6));
   return a ? { phrase: `by ${a.name}`, store: a.name } : undefined;
 }
 
@@ -345,7 +378,8 @@ function describeTurnAtAnchor(at: Coordinate, anchors: Anchor[]): { phrase: stri
 function passedOnLeg(route: Coordinate[], from: Coordinate, to: Coordinate, stores: Store[], anchors: Anchor[]): string[] {
   const start = Math.floor(distanceToPolylineM(from, route).index);
   const end = Math.ceil(distanceToPolylineM(to, route).index) + 1;
-  const leg = route.slice(start, Math.max(end, start + 2));
+  // Only the part of the stretch on this level: you can't see stores on the floor above.
+  const leg = route.slice(start, Math.max(end, start + 2)).filter(p => !from.floorId || !p.floorId || p.floorId === from.floorId);
   if (leg.length < 2) return [];
 
   const hits: { name: string; index: number }[] = [];
@@ -357,6 +391,7 @@ function passedOnLeg(route: Coordinate[], from: Coordinate, to: Coordinate, stor
     }
   }
   for (const a of anchors) {
+    if (from.floorId && a.floorId !== from.floorId) continue;
     const near = leg.map((p, i) => ({ i, d: distanceToAnchorM(p, a) })).filter(x => x.d <= 4);
     if (near.length) hits.push({ name: a.name, index: near[0].i });
   }
@@ -375,16 +410,23 @@ function metersAlong(route: Coordinate[], index: number): number {
 /** The first mall door the route passes through, and how far along the route it is. */
 function entryDoor(
   route: Coordinate[],
-  doorways: { name: string; coordinate: Coordinate }[],
+  doorways: { name: string; coordinate: Coordinate; radius?: number }[],
 ): { name: string; alongM: number; coordinate: Coordinate } | undefined {
   const hit = doorways
-    .map(d => ({ name: d.name, coordinate: d.coordinate, ...distanceToPolylineM(d.coordinate, route) }))
-    .filter(d => d.distance <= 3)
+    .map(d => ({ name: d.name, coordinate: d.coordinate, radius: d.radius ?? 3, ...distanceToPolylineM(d.coordinate, route) }))
+    .filter(d => d.distance <= d.radius)
+    // Same spot on another level (an entrance right above the garage) doesn't count.
+    .filter(d => !d.coordinate.floorId || route[Math.floor(d.index)]?.floorId === d.coordinate.floorId)
     .sort((a, b) => a.index - b.index)[0];
   if (!hit) return undefined;
   let alongM = 0;
   for (let i = 0; i < Math.floor(hit.index) && i < route.length - 1; i++) alongM += distanceM(route[i], route[i + 1]);
   return { name: hit.name, alongM, coordinate: hit.coordinate };
+}
+
+/** Stores on the same level as a point (single-level maps return everything). */
+function sameFloor(stores: Store[], at: Coordinate): Store[] {
+  return at.floorId ? stores.filter(s => s.space.floor.id === at.floorId) : stores;
 }
 
 /** Stores whose frontage sits right on the route, in the order the shopper walks past them. */
@@ -394,7 +436,9 @@ export function storesPassed(directions: Directions, to: Store, stores: Store[],
   return stores
     .filter(s => s.id !== to.id)
     .map(s => {
-      const hits = s.frontage.map(f => distanceToPolylineM(f, line));
+      const onLevel = line.filter(p => !p.floorId || p.floorId === s.space.floor.id);
+      if (onLevel.length < 2) return { name: s.name, distance: Infinity, index: 0 };
+      const hits = s.frontage.map(f => distanceToPolylineM(f, onLevel));
       const best = hits.reduce((a, b) => (b.distance < a.distance ? b : a));
       return { name: s.name, ...best };
     })

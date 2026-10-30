@@ -24,7 +24,7 @@ function precacheManifest(): Plugin {
 }
 
 /**
- * Serves api/mappedin-token.js during `npm run dev`, using MAPPEDIN_KEY/MAPPEDIN_SECRET from
+ * Serves api/mappedin-token.js during `npm run dev`, using the MAPPEDIN_* credentials from
  * .env.local, so local development uses the same token flow as production.
  */
 function devTokenEndpoint(mode: string): Plugin {
@@ -33,9 +33,9 @@ function devTokenEndpoint(mode: string): Plugin {
     apply: 'serve',
     configureServer(server) {
       Object.assign(process.env, loadEnv(mode, process.cwd(), 'MAPPEDIN_'));
-      server.middlewares.use('/api/mappedin-token', async (_req, res) => {
+      server.middlewares.use('/api/mappedin-token', async (req, res) => {
         const { GET } = await import('./api/mappedin-token.js');
-        const response: Response = await GET();
+        const response: Response = await GET(new Request(`http://localhost${req.originalUrl ?? req.url}`));
         res.statusCode = response.status;
         response.headers.forEach((value, name) => res.setHeader(name, value));
         res.end(await response.text());

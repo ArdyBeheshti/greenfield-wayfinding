@@ -16,10 +16,16 @@ export type QaRow = {
   distanceM: number;
   steps: number;
   turnsWithoutLandmark: number;
+  /** Level changes on the normal route, e.g. "escalator". */
+  levelChange: string;
+  /** For routes that change level: what the step-free route uses instead. */
+  stepFree: string;
   issue: string;
 };
 
-const LONG_ROUTE_M = 400;
+// A regional mall is much bigger than a one-level centre; flag what's long for this venue.
+const longRouteM = (stores: Store[]) => (stores.length > 100 ? 700 : 400);
+const STEPS_OR_ESCALATOR = new Set(['stairs', 'escalator']);
 const MAX_STEPS = 10;
 
 export async function runQa(
@@ -43,6 +49,8 @@ export async function runQa(
         distanceM: 0,
         steps: 0,
         turnsWithoutLandmark: 0,
+        levelChange: '',
+        stepFree: '',
         issue: '',
       };
       try {
@@ -57,7 +65,23 @@ export async function runQa(
           row.steps = steps.length;
           row.turnsWithoutLandmark = turns.filter(t => !t.landmark).length;
           const issues = [];
-          if (directions.distance > LONG_ROUTE_M) issues.push(`Long route (${formatDistance(directions.distance)})`);
+          const kinds = (d: typeof directions) =>
+            d.instructions.filter(i => i.action.type === 'TakeConnection').map(i => i.action.connection?.type ?? 'connection');
+          row.levelChange = kinds(directions).join(' + ');
+          // Step-free check: any route that changes level must have a step-free alternative
+          // that really avoids stairs and escalators.
+          if (row.levelChange) {
+            const accessible = await mapData.getDirections(entrance.target, store.space, { zones: areas.zones, accessible: true });
+            if (!accessible) {
+              row.stepFree = 'none';
+              issues.push('No step-free route');
+            } else {
+              const used = kinds(accessible);
+              row.stepFree = used.join(' + ');
+              if (used.some(k => STEPS_OR_ESCALATOR.has(k))) issues.push(`Step-free route uses ${row.stepFree}`);
+            }
+          }
+          if (directions.distance > longRouteM(stores)) issues.push(`Long route (${formatDistance(directions.distance)})`);
           if (steps.length > MAX_STEPS) issues.push(`${steps.length} steps`);
           if (row.turnsWithoutLandmark > 0) issues.push(`${row.turnsWithoutLandmark} turn(s) with no landmark`);
           row.issue = issues.join('; ');
@@ -80,12 +104,12 @@ export function summarize(rows: QaRow[]) {
 }
 
 export function toCsv(rows: QaRow[]): string {
-  const header = ['entrance_id', 'entrance', 'store', 'route_found', 'distance_m', 'steps', 'turns_without_landmark', 'issue'];
+  const header = ['entrance_id', 'entrance', 'store', 'route_found', 'distance_m', 'steps', 'turns_without_landmark', 'level_change', 'step_free_uses', 'issue'];
   const esc = (v: unknown) => `"${String(v).replace(/"/g, '""')}"`;
   return [
     header.join(','),
     ...rows.map(r =>
-      [r.entranceId, r.entrance, r.store, r.ok, r.distanceM, r.steps, r.turnsWithoutLandmark, r.issue].map(esc).join(','),
+      [r.entranceId, r.entrance, r.store, r.ok, r.distanceM, r.steps, r.turnsWithoutLandmark, r.levelChange, r.stepFree, r.issue].map(esc).join(','),
     ),
   ].join('\n');
 }

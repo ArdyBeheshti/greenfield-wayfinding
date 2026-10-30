@@ -12,14 +12,14 @@ const NETWORK_TIMEOUT_MS = 8000;
 
 export type LoadResult = { mapData: MapData; source: 'network' | 'cache'; savedAt?: number };
 
-type Options = { mapId: string };
+type Options = { mapId: string; source?: 'maker' | 'enterprise' };
 
 /**
  * Short-lived Mappedin access token from our own endpoint (api/mappedin-token.ts). The API
  * key and secret stay on the server; the browser only ever holds the token.
  */
-async function fetchAccessToken(): Promise<string> {
-  const res = await fetch('/api/mappedin-token', { cache: 'no-store' });
+async function fetchAccessToken(source: 'maker' | 'enterprise' = 'maker'): Promise<string> {
+  const res = await fetch(`/api/mappedin-token?source=${source}`, { cache: 'no-store' });
   if (!res.ok) throw new Error(`Token request failed (${res.status})`);
   const { accessToken } = (await res.json()) as { accessToken: string };
   return accessToken;
@@ -29,7 +29,7 @@ export async function loadMapData(options: Options): Promise<LoadResult> {
   if (navigator.onLine) {
     try {
       const mapData = await withTimeout(
-        fetchAccessToken().then(accessToken => getMapData({ accessToken, mapId: options.mapId })),
+        fetchAccessToken(options.source).then(accessToken => getMapData({ accessToken, mapId: options.mapId })),
         NETWORK_TIMEOUT_MS,
       );
       void saveToCache(options.mapId, mapData); // don't block first paint on the save
